@@ -12,7 +12,7 @@ import backtrader as bt
 from .backtest import build_report, create_cerebro
 from .config import BacktestConfig, OptimizationConfig
 from .data import fetch_data, load_dataframe
-from .strategy import MovingAverageCrossStrategy
+from .strategy import MovingAverageCrossStrategy, strategy_from_config
 from .utils import configure_logging, timestamped_filename
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,13 @@ def run_optimization(
         cerebro = create_cerebro(cfg_copy)
         data_feed = bt.feeds.PandasData(dataname=df)
         cerebro.adddata(data_feed)
-        cerebro.addstrategy(MovingAverageCrossStrategy, **params, position_size=cfg_copy.strategy.position_size)
+        strategy_cls, strategy_params = strategy_from_config(cfg_copy.strategy)
+        if strategy_cls is not MovingAverageCrossStrategy:
+            raise ValueError(
+                "Optimization currently only supports the 'moving_average_cross' strategy. "
+                "Update OptimizationConfig to target moving average parameters."
+            )
+        cerebro.addstrategy(strategy_cls, **strategy_params)
 
         logger.info(
             "Optimization run for params: short=%s long=%s stop=%.3f take=%.3f",

@@ -12,6 +12,9 @@ from .optimizer import run_optimization
 from .trading import run_trade_session
 
 
+STRATEGY_CHOICES = ("moving_average_cross", "mean_reversion", "multi_factor_alpha", "machine_learning_alpha")
+
+
 def _parse_range(values: Sequence[str], cast):
     if not values:
         return []
@@ -29,6 +32,33 @@ def _build_data_config(args: argparse.Namespace) -> DataConfig:
     return DataConfig(symbol=args.symbol, start=args.start, end=args.end, interval=args.interval)
 
 
+def _build_strategy_config(args: argparse.Namespace) -> StrategyConfig:
+    defaults = StrategyConfig()
+    return StrategyConfig(
+        name=getattr(args, "strategy", defaults.name),
+        short_window=getattr(args, "short_window", defaults.short_window),
+        long_window=getattr(args, "long_window", defaults.long_window),
+        stop_loss=getattr(args, "stop_loss", defaults.stop_loss),
+        take_profit=getattr(args, "take_profit", defaults.take_profit),
+        position_size=getattr(args, "position_size", defaults.position_size),
+        momentum_window=getattr(args, "momentum_window", defaults.momentum_window),
+        mean_reversion_window=getattr(args, "mean_reversion_window", defaults.mean_reversion_window),
+        volatility_window=getattr(args, "volatility_window", defaults.volatility_window),
+        momentum_weight=getattr(args, "momentum_weight", defaults.momentum_weight),
+        mean_reversion_weight=getattr(args, "mean_reversion_weight", defaults.mean_reversion_weight),
+        volatility_weight=getattr(args, "volatility_weight", defaults.volatility_weight),
+        signal_threshold=getattr(args, "signal_threshold", defaults.signal_threshold),
+        rebalance_interval=getattr(args, "rebalance_interval", defaults.rebalance_interval),
+        volatility_target=getattr(args, "volatility_target", defaults.volatility_target),
+        mean_reversion_entry_z=getattr(args, "mr_entry_z", defaults.mean_reversion_entry_z),
+        mean_reversion_exit_z=getattr(args, "mr_exit_z", defaults.mean_reversion_exit_z),
+        allow_short=getattr(args, "allow_short", defaults.allow_short),
+        ml_model_path=getattr(args, "model_path", defaults.ml_model_path),
+        ml_positive_threshold=getattr(args, "ml_positive_threshold", defaults.ml_positive_threshold),
+        ml_negative_threshold=getattr(args, "ml_negative_threshold", defaults.ml_negative_threshold),
+    )
+
+
 def fetch_command(args: argparse.Namespace) -> None:
     cfg = _build_data_config(args)
     path = fetch_data(cfg, overwrite=args.overwrite)
@@ -37,13 +67,7 @@ def fetch_command(args: argparse.Namespace) -> None:
 
 def backtest_command(args: argparse.Namespace) -> None:
     data_cfg = _build_data_config(args)
-    strategy_cfg = StrategyConfig(
-        short_window=args.short_window,
-        long_window=args.long_window,
-        stop_loss=args.stop_loss,
-        take_profit=args.take_profit,
-        position_size=args.position_size,
-    )
+    strategy_cfg = _build_strategy_config(args)
     backtest_cfg = BacktestConfig(
         initial_cash=args.cash,
         commission=args.commission,
@@ -56,8 +80,10 @@ def backtest_command(args: argparse.Namespace) -> None:
 
 
 def optimize_command(args: argparse.Namespace) -> None:
+    if args.strategy != "moving_average_cross":
+        raise ValueError("Optimization currently supports the moving_average_cross strategy.")
     data_cfg = _build_data_config(args)
-    strategy_cfg = StrategyConfig(position_size=args.position_size)
+    strategy_cfg = _build_strategy_config(args)
     backtest_cfg = BacktestConfig(
         initial_cash=args.cash,
         commission=args.commission,
@@ -79,13 +105,7 @@ def optimize_command(args: argparse.Namespace) -> None:
 
 def trade_command(args: argparse.Namespace) -> None:
     data_cfg = _build_data_config(args)
-    strategy_cfg = StrategyConfig(
-        short_window=args.short_window,
-        long_window=args.long_window,
-        stop_loss=args.stop_loss,
-        take_profit=args.take_profit,
-        position_size=args.position_size,
-    )
+    strategy_cfg = _build_strategy_config(args)
     trade_cfg = TradeConfig(
         broker=args.broker,
         cash=args.cash,
@@ -111,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     backtest_parser = subparsers.add_parser("backtest", help="Run a backtest.")
     _add_data_arguments(backtest_parser)
+    backtest_parser.add_argument(
+        "--strategy",
+        choices=STRATEGY_CHOICES,
+        default="moving_average_cross",
+        help="Strategy to execute (moving_average_cross, mean_reversion, multi_factor_alpha).",
+    )
     backtest_parser.add_argument("--cash", type=float, default=100000)
     backtest_parser.add_argument("--commission", type=float, default=0.001)
     backtest_parser.add_argument("--slippage", type=float, default=0.0005)
@@ -119,11 +145,85 @@ def build_parser() -> argparse.ArgumentParser:
     backtest_parser.add_argument("--stop-loss", type=float, default=0.03)
     backtest_parser.add_argument("--take-profit", type=float, default=0.05)
     backtest_parser.add_argument("--position-size", type=float, default=0.95)
+    backtest_parser.add_argument("--momentum-window", type=int, default=63, help="Lookback for the momentum factor.")
+    backtest_parser.add_argument(
+        "--mean-reversion-window",
+        type=int,
+        default=20,
+        help="Lookback window for mean reversion calculations.",
+    )
+    backtest_parser.add_argument("--volatility-window", type=int, default=20, help="Lookback for volatility estimation.")
+    backtest_parser.add_argument("--momentum-weight", type=float, default=0.6, help="Weight for the momentum factor.")
+    backtest_parser.add_argument(
+        "--mean-reversion-weight",
+        type=float,
+        default=0.3,
+        help="Weight for the mean reversion factor.",
+    )
+    backtest_parser.add_argument("--volatility-weight", type=float, default=0.1, help="Weight for the volatility factor.")
+    backtest_parser.add_argument(
+        "--signal-threshold",
+        type=float,
+        default=0.05,
+        help="Absolute composite score required before entering a position.",
+    )
+    backtest_parser.add_argument(
+        "--rebalance-interval",
+        type=int,
+        default=5,
+        help="Bars between rebalances for the multi-factor strategy.",
+    )
+    backtest_parser.add_argument(
+        "--volatility-target",
+        type=float,
+        default=None,
+        help="Optional volatility target; omit for no targeting.",
+    )
+    backtest_parser.add_argument(
+        "--model-path",
+        default=None,
+        help="Path to a trained LightGBM model file (required for machine_learning_alpha).",
+    )
+    backtest_parser.add_argument(
+        "--ml-positive-threshold",
+        type=float,
+        default=0.55,
+        help="Probability threshold to trigger long positions for ML strategies.",
+    )
+    backtest_parser.add_argument(
+        "--ml-negative-threshold",
+        type=float,
+        default=0.45,
+        help="Probability threshold to trigger short positions for ML strategies.",
+    )
+    backtest_parser.add_argument(
+        "--mr-entry-z",
+        type=float,
+        default=1.0,
+        help="Z-score entry threshold for the mean reversion strategy.",
+    )
+    backtest_parser.add_argument(
+        "--mr-exit-z",
+        type=float,
+        default=0.25,
+        help="Z-score exit threshold for the mean reversion strategy.",
+    )
+    backtest_parser.add_argument(
+        "--allow-short",
+        action="store_true",
+        help="Allow strategies to take short exposure where supported.",
+    )
     backtest_parser.add_argument("--plot", action="store_true", help="Display the Backtrader plot.")
     backtest_parser.set_defaults(func=backtest_command)
 
     opt_parser = subparsers.add_parser("optimize", help="Optimize strategy parameters.")
     _add_data_arguments(opt_parser)
+    opt_parser.add_argument(
+        "--strategy",
+        choices=STRATEGY_CHOICES,
+        default="moving_average_cross",
+        help="Strategy to optimize (currently only moving_average_cross supported).",
+    )
     opt_parser.add_argument("--cash", type=float, default=100000)
     opt_parser.add_argument("--commission", type=float, default=0.001)
     opt_parser.add_argument("--slippage", type=float, default=0.0005)
@@ -138,6 +238,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     trade_parser = subparsers.add_parser("trade", help="Run trading session (paper by default).")
     _add_data_arguments(trade_parser)
+    trade_parser.add_argument(
+        "--strategy",
+        choices=STRATEGY_CHOICES,
+        default="moving_average_cross",
+        help="Strategy to execute during trading.",
+    )
     trade_parser.add_argument("--broker", default="paper", help="Broker to use (paper).")
     trade_parser.add_argument("--cash", type=float, default=25000)
     trade_parser.add_argument("--commission", type=float, default=0.001)
@@ -146,6 +252,21 @@ def build_parser() -> argparse.ArgumentParser:
     trade_parser.add_argument("--stop-loss", type=float, default=0.03)
     trade_parser.add_argument("--take-profit", type=float, default=0.05)
     trade_parser.add_argument("--position-size", type=float, default=0.95)
+    trade_parser.add_argument("--momentum-window", type=int, default=63)
+    trade_parser.add_argument("--mean-reversion-window", type=int, default=20)
+    trade_parser.add_argument("--volatility-window", type=int, default=20)
+    trade_parser.add_argument("--momentum-weight", type=float, default=0.6)
+    trade_parser.add_argument("--mean-reversion-weight", type=float, default=0.3)
+    trade_parser.add_argument("--volatility-weight", type=float, default=0.1)
+    trade_parser.add_argument("--signal-threshold", type=float, default=0.05)
+    trade_parser.add_argument("--rebalance-interval", type=int, default=5)
+    trade_parser.add_argument("--volatility-target", type=float, default=None)
+    trade_parser.add_argument("--model-path", default=None)
+    trade_parser.add_argument("--ml-positive-threshold", type=float, default=0.55)
+    trade_parser.add_argument("--ml-negative-threshold", type=float, default=0.45)
+    trade_parser.add_argument("--mr-entry-z", type=float, default=1.0)
+    trade_parser.add_argument("--mr-exit-z", type=float, default=0.25)
+    trade_parser.add_argument("--allow-short", action="store_true")
     trade_parser.add_argument("--poll-interval", type=int, default=60, help="Refresh interval in seconds when looping.")
     trade_parser.add_argument("--loop", action="store_true", help="Loop indefinitely for paper trading.")
     trade_parser.set_defaults(func=trade_command)
