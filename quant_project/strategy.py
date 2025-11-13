@@ -5,14 +5,29 @@ from __future__ import annotations
 import logging
 import math
 import statistics
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import backtrader as bt
+
+try:
+    import lightgbm as lgb
+except ImportError:  # pragma: no cover - optional dependency
+    lgb = None  # type: ignore[assignment]
 
 from .config import StrategyConfig
 
 logger = logging.getLogger(__name__)
 DEFAULT_CFG = StrategyConfig()
+
+
+def _safe_numeric(value: Any, default: float = 0.0) -> float:
+    try:
+        result = float(value)
+        if math.isnan(result) or math.isinf(result):
+            return default
+        return result
+    except (TypeError, ValueError):
+        return default
 
 
 class BaseStrategy(bt.Strategy):
@@ -311,6 +326,151 @@ class MultiFactorAlphaStrategy(BaseStrategy):
         self.last_rebalance_bar = len(self)
 
 
+class MachineLearningAlphaStrategy(BaseStrategy):
+    """Machine-learning driven alpha strategy that consumes factor features."""
+
+    params = (
+        ("model_path", DEFAULT_CFG.ml_model_path),
+        ("positive_threshold", DEFAULT_CFG.ml_positive_threshold),
+        ("negative_threshold", DEFAULT_CFG.ml_negative_threshold),
+        ("momentum_window", DEFAULT_CFG.momentum_window),
+        ("mean_reversion_window", DEFAULT_CFG.mean_reversion_window),
+        ("volatility_window", DEFAULT_CFG.volatility_window),
+        ("rebalance_interval", DEFAULT_CFG.rebalance_interval),
+        ("position_size", DEFAULT_CFG.position_size),
+        ("volatility_target", DEFAULT_CFG.volatility_target),
+        ("allow_short", DEFAULT_CFG.allow_short),
+    )
+
+    def __init__(self):
+        super().__init__()
+        if not self.p.model_path:
+            raise ValueError("MachineLearningAlphaStrategy requires 'model_path' to be set.")
+        if lgb is None:
+            raise ImportError(
+                "lightgbm is required for MachineLearningAlphaStrategy. Install it with `pip install lightgbm`."
+            )
+        if self.p.negative_threshold >= self.p.positive_threshold:
+            raise ValueError("positive_threshold must be greater than negative_threshold for MachineLearningAlphaStrategy.")
+
+        self.model = lgb.Booster(model_file=self.p.model_path)
+        self.mean_sma = bt.indicators.SMA(self.datas[0], period=self.p.mean_reversion_window)
+        self.mean_std = bt.indicators.StdDev(self.datas[0], period=self.p.mean_reversion_window)
+        self.last_rebalance_bar = -self.p.rebalance_interval
+
+    def _volatility(self) -> float:
+        returns = []
+        for i in range(1, self.p.volatility_window + 1):
+            try:
+                prev_price = _safe_numeric(self.data.close[-i - 1])
+                curr_price = _safe_numeric(self.data.close[-i])
+            except IndexError:
+                break
+            if prev_price:
+                returns.append((curr_price / prev_price) - 1)
+        if not returns:
+            return 0.0
+        if len(returns) == 1:
+            return abs(returns[0])
+        return statistics.pstdev(returns)
+
+    def _build_features(self) -> Dict[str, float]:
+        price = _safe_numeric(self.data.close[0])
+        try:
+            past_price = _safe_numeric(self.data.close[-self.p.momentum_window])
+        except IndexError:
+            past_price = 0.0
+
+        momentum = 0.0
+        if past_price:
+            momentum = (price / past_price) - 1
+
+        std = _safe_numeric(self.mean_std[0])
+        mean = _safe_numeric(self.mean_sma[0])
+        mean_reversion = 0.0 if std == 0 else (price - mean) / std
+
+        volatility = self._volatility()
+
+        try:
+            prev_close = _safe_numeric(self.data.close[-1])
+        except IndexError:
+            prev_close = 0.0
+        daily_return = 0.0
+        if prev_close:
+            daily_return = (price / prev_close) - 1
+
+        volume = 0.0
+        if hasattr(self.data, "volume"):
+            volume = _safe_numeric(self.data.volume[0])
+
+        return {
+            "momentum": momentum,
+            "mean_reversion_z": mean_reversion,
+            "volatility": volatility,
+            "daily_return": daily_return,
+            "volume": volume,
+        }
+
+    def _target_from_prediction(self, prediction: float, volatility: float) -> float:
+        target = 0.0
+        if prediction >= self.p.positive_threshold:
+            strength = (prediction - self.p.positive_threshold) / max(1e-6, 1 - self.p.positive_threshold)
+            target = min(1.0, max(0.0, strength)) * self.p.position_size
+        elif self.p.allow_short and prediction <= self.p.negative_threshold:
+            strength = (self.p.negative_threshold - prediction) / max(1e-6, self.p.negative_threshold)
+            target = -min(1.0, max(0.0, strength)) * self.p.position_size
+
+        if self.p.volatility_target and volatility > 0:
+            scale = self.p.volatility_target / volatility
+            target *= max(0.0, min(1.0, scale))
+        return target
+
+    def next(self):
+        if self.order:
+            return
+
+        features = self._build_features()
+        feature_vector = [
+            features["momentum"],
+            features["mean_reversion_z"],
+            features["volatility"],
+            features["daily_return"],
+            features["volume"],
+        ]
+
+        prediction = float(self.model.predict([feature_vector])[0])
+        target_percent = self._target_from_prediction(prediction, features["volatility"])
+
+        price = _safe_numeric(self.data.close[0])
+        current_exposure = self._current_exposure(price)
+        exposure_gap = abs(target_percent - current_exposure)
+        bars_since = len(self) - self.last_rebalance_bar
+        should_rebalance = (
+            bars_since >= self.p.rebalance_interval
+            or (self.position and target_percent == 0.0)
+            or exposure_gap >= 0.05
+        )
+
+        if not should_rebalance:
+            return
+
+        if self.order:
+            self.cancel(self.order)
+
+        self._log(
+            "ML SIGNAL -> pred=%.4f target=%.2f%% (mom=%.4f, mean=%.4f, vol=%.4f, ret=%.4f, volu=%.0f)",
+            prediction,
+            target_percent * 100,
+            features["momentum"],
+            features["mean_reversion_z"],
+            features["volatility"],
+            features["daily_return"],
+            features["volume"],
+        )
+        self.order = self.order_target_percent(target=target_percent)
+        self.last_rebalance_bar = len(self)
+
+
 def _normalise_name(name: str) -> str:
     return name.replace("-", "_").lower()
 
@@ -354,6 +514,25 @@ def strategy_from_config(cfg: StrategyConfig) -> Tuple[type[bt.Strategy], dict]:
             allow_short=cfg.allow_short,
         )
         return MultiFactorAlphaStrategy, params
+
+    if name in {"machine_learning_alpha", "ml_alpha", "lightgbm_alpha"}:
+        if not cfg.ml_model_path:
+            raise ValueError("Strategy 'machine_learning_alpha' requires 'ml_model_path' to be set.")
+        if cfg.ml_negative_threshold >= cfg.ml_positive_threshold:
+            raise ValueError("ml_positive_threshold must be greater than ml_negative_threshold.")
+        params = dict(
+            model_path=cfg.ml_model_path,
+            positive_threshold=cfg.ml_positive_threshold,
+            negative_threshold=cfg.ml_negative_threshold,
+            momentum_window=cfg.momentum_window,
+            mean_reversion_window=cfg.mean_reversion_window,
+            volatility_window=cfg.volatility_window,
+            rebalance_interval=cfg.rebalance_interval,
+            position_size=cfg.position_size,
+            volatility_target=cfg.volatility_target,
+            allow_short=cfg.allow_short,
+        )
+        return MachineLearningAlphaStrategy, params
 
     raise ValueError(f"Unsupported strategy '{cfg.name}'.")
 

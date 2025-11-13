@@ -69,6 +69,9 @@ class StrategyConfig:
     mean_reversion_entry_z: float = 1.0
     mean_reversion_exit_z: float = 0.25
     allow_short: bool = False
+    ml_model_path: Optional[str] = None
+    ml_positive_threshold: float = 0.55
+    ml_negative_threshold: float = 0.45
 
 
 @dataclass(slots=True)

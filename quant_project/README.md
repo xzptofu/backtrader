@@ -5,7 +5,7 @@ This project adds an end-to-end quantitative trading workflow on top of Backtrad
 ## Features
 
 - **Automated data downloads** via `yfinance` with caching to `quant_project/data/`.
-- **Configurable strategies**: Moving-average crossover, z-score mean reversion, and a multi-factor alpha model with customizable risk controls.
+- **Configurable strategies**: Moving-average crossover, z-score mean reversion, multi-factor alpha, and LightGBM-driven machine-learning models with customizable risk controls.
 - **Backtesting pipeline** that generates JSON performance reports in `quant_project/reports/`.
 - **Parameter optimisation** sweeping strategy windows and risk controls.
 - **Paper-trading loop** that periodically refreshes the latest data and re-evaluates positions.
@@ -20,6 +20,12 @@ pip install yfinance pandas matplotlib
 ```
 
 If you want plots during backtests, make sure `matplotlib` is available. Optimisation can be CPU-intensive—adjust ranges to fit your machine.
+
+For the machine-learning strategy, install LightGBM:
+
+```bash
+pip install lightgbm
+```
 
 ## Quick Start
 
@@ -50,6 +56,14 @@ python -m quant_project backtest --symbol AAPL --start 2022-01-01 \
   --allow-short
 ```
 
+To use a pre-trained LightGBM model, provide its file path and probability thresholds:
+
+```bash
+python -m quant_project backtest --symbol AAPL --start 2022-01-01 \
+  --strategy machine_learning_alpha --model-path models/lgbm_alpha.txt \
+  --ml-positive-threshold 0.6 --ml-negative-threshold 0.4 --allow-short
+```
+
 ### 3. Optimise Strategy Parameters
 
 ```bash
@@ -75,12 +89,13 @@ This launches a paper-trading session. It downloads the most recent data at the 
 - `moving_average_cross`: Classic dual-SMA crossover with optional stop-loss and take-profit controls.
 - `mean_reversion`: Z-score mean-reversion using configurable lookback and entry/exit thresholds; optional short exposure.
 - `multi_factor_alpha`: Combines momentum, mean reversion, and volatility factors into a single alpha score with tunable weights, rebalancing cadence, and optional volatility targeting.
+- `machine_learning_alpha`: Loads a LightGBM model and feeds it factor features (momentum, z-score, volatility, daily return, volume) to produce a probability-driven target exposure with configurable long/short thresholds.
 
 ## Module Overview
 
 - `config.py` — dataclasses describing configuration for data, strategy, backtests, optimisation, and trading.
 - `data.py` — download and load data, returning Pandas DataFrames or Backtrader feeds.
-- `strategy.py` — Backtrader strategies (moving average, mean reversion, multi-factor alpha) and configuration helpers.
+- `strategy.py` — Backtrader strategies (moving average, mean reversion, multi-factor alpha, LightGBM alpha) and configuration helpers.
 - `backtest.py` — sets up Cerebro, runs backtests, and emits JSON reports.
 - `optimizer.py` — brute-force parameter search that reuses the backtest pipeline.
 - `trading.py` — paper trading loop with extensible broker integration placeholder.

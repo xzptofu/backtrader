@@ -7,6 +7,7 @@ from quant_project.strategy import (
     MeanReversionStrategy,
     MovingAverageCrossStrategy,
     MultiFactorAlphaStrategy,
+    MachineLearningAlphaStrategy,
     strategy_from_config,
 )
 
@@ -66,6 +67,32 @@ class StrategyFactoryTestCase(unittest.TestCase):
         cfg = StrategyConfig(name="Multi-Factor-Alpha")
         strategy_cls, _ = strategy_from_config(cfg)
         self.assertIs(strategy_cls, MultiFactorAlphaStrategy)
+
+    def test_machine_learning_strategy_requires_model_path(self) -> None:
+        cfg = StrategyConfig(name="machine_learning_alpha")
+        with self.assertRaises(ValueError):
+            strategy_from_config(cfg)
+
+    def test_machine_learning_strategy_selection(self) -> None:
+        cfg = StrategyConfig(
+            name="ml_alpha",
+            ml_model_path="models/test.txt",
+            ml_positive_threshold=0.6,
+            ml_negative_threshold=0.4,
+            momentum_window=40,
+            mean_reversion_window=18,
+            volatility_window=10,
+            position_size=0.75,
+            allow_short=True,
+        )
+        strategy_cls, params = strategy_from_config(cfg)
+        self.assertIs(strategy_cls, MachineLearningAlphaStrategy)
+        self.assertEqual(params["model_path"], "models/test.txt")
+        self.assertEqual(params["positive_threshold"], 0.6)
+        self.assertEqual(params["negative_threshold"], 0.4)
+        self.assertEqual(params["momentum_window"], 40)
+        self.assertEqual(params["mean_reversion_window"], 18)
+        self.assertTrue(params["allow_short"])
 
 
 if __name__ == "__main__":  # pragma: no cover

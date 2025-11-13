@@ -12,7 +12,7 @@ from .optimizer import run_optimization
 from .trading import run_trade_session
 
 
-STRATEGY_CHOICES = ("moving_average_cross", "mean_reversion", "multi_factor_alpha")
+STRATEGY_CHOICES = ("moving_average_cross", "mean_reversion", "multi_factor_alpha", "machine_learning_alpha")
 
 
 def _parse_range(values: Sequence[str], cast):
@@ -53,6 +53,9 @@ def _build_strategy_config(args: argparse.Namespace) -> StrategyConfig:
         mean_reversion_entry_z=getattr(args, "mr_entry_z", defaults.mean_reversion_entry_z),
         mean_reversion_exit_z=getattr(args, "mr_exit_z", defaults.mean_reversion_exit_z),
         allow_short=getattr(args, "allow_short", defaults.allow_short),
+        ml_model_path=getattr(args, "model_path", defaults.ml_model_path),
+        ml_positive_threshold=getattr(args, "ml_positive_threshold", defaults.ml_positive_threshold),
+        ml_negative_threshold=getattr(args, "ml_negative_threshold", defaults.ml_negative_threshold),
     )
 
 
@@ -177,6 +180,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional volatility target; omit for no targeting.",
     )
     backtest_parser.add_argument(
+        "--model-path",
+        default=None,
+        help="Path to a trained LightGBM model file (required for machine_learning_alpha).",
+    )
+    backtest_parser.add_argument(
+        "--ml-positive-threshold",
+        type=float,
+        default=0.55,
+        help="Probability threshold to trigger long positions for ML strategies.",
+    )
+    backtest_parser.add_argument(
+        "--ml-negative-threshold",
+        type=float,
+        default=0.45,
+        help="Probability threshold to trigger short positions for ML strategies.",
+    )
+    backtest_parser.add_argument(
         "--mr-entry-z",
         type=float,
         default=1.0,
@@ -241,6 +261,9 @@ def build_parser() -> argparse.ArgumentParser:
     trade_parser.add_argument("--signal-threshold", type=float, default=0.05)
     trade_parser.add_argument("--rebalance-interval", type=int, default=5)
     trade_parser.add_argument("--volatility-target", type=float, default=None)
+    trade_parser.add_argument("--model-path", default=None)
+    trade_parser.add_argument("--ml-positive-threshold", type=float, default=0.55)
+    trade_parser.add_argument("--ml-negative-threshold", type=float, default=0.45)
     trade_parser.add_argument("--mr-entry-z", type=float, default=1.0)
     trade_parser.add_argument("--mr-exit-z", type=float, default=0.25)
     trade_parser.add_argument("--allow-short", action="store_true")
