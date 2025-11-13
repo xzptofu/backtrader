@@ -49,13 +49,26 @@ class DataConfig:
 
 @dataclass(slots=True)
 class StrategyConfig:
-    """Configuration for the default sample strategy."""
+    """Configuration for supported trading strategies."""
 
+    name: str = "moving_average_cross"
     short_window: int = 20
     long_window: int = 50
     stop_loss: float = 0.03  # 3%
     take_profit: float = 0.05  # 5%
     position_size: float = 0.95  # invest 95% of available cash
+    momentum_window: int = 63
+    mean_reversion_window: int = 20
+    volatility_window: int = 20
+    momentum_weight: float = 0.6
+    mean_reversion_weight: float = 0.3
+    volatility_weight: float = 0.1
+    signal_threshold: float = 0.05
+    rebalance_interval: int = 5
+    volatility_target: Optional[float] = None
+    mean_reversion_entry_z: float = 1.0
+    mean_reversion_exit_z: float = 0.25
+    allow_short: bool = False
 
 
 @dataclass(slots=True)
