@@ -91,10 +91,31 @@ This launches a paper-trading session. It downloads the most recent data at the 
 - `multi_factor_alpha`: Combines momentum, mean reversion, and volatility factors into a single alpha score with tunable weights, rebalancing cadence, and optional volatility targeting.
 - `machine_learning_alpha`: Loads a LightGBM model and feeds it factor features (momentum, z-score, volatility, daily return, volume) to produce a probability-driven target exposure with configurable long/short thresholds.
 
+## Factor Pool & Model Workflow
+
+- **Unified factor formulas** live in `quant_project/factors.py`. Each factor is implemented as a reusable formula class with adjustable parameters and a shared interface for both offline generation and online inference.
+- **Inspect the pool** with `python -m quant_project factors list` to view the registered factors and descriptions.
+- **Generate factor datasets** for model training with the CLI helper:
+
+  ```bash
+  python -m quant_project factors build --symbol AAPL --start 2020-01-01 \
+    --factor momentum:fast --factor momentum:slow --factor mean_reversion_z \
+    --factor-param momentum.window=63 --factor-param slow.window=126 \
+    --forward 1 5 20 --output quant_project/data/aapl-factors.csv
+  ```
+
+  - `--factor` accepts `name` or `name:alias` for duplicate formulas.
+  - `--factor-param identifier.param=value` overrides formula parameters. `identifier` can be either the factor name or its alias.
+  - `--forward` appends forward returns for supervised training labels. Use `--keep-na` to retain rows with missing data.
+
+- **Strategy integration:** the `machine_learning_alpha` strategy now reads the same factor specifications via `StrategyConfig.factor_names`/`factor_params`, ensuring that the online deployment uses the identical feature definitions as the offline training script.
+
 ## Module Overview
 
 - `config.py` — dataclasses describing configuration for data, strategy, backtests, optimisation, and trading.
 - `data.py` — download and load data, returning Pandas DataFrames or Backtrader feeds.
+- `factors.py` — reusable factor formulas, registry, and runtime buffer helpers.
+- `factor_pipeline.py` — utilities to build and persist factor datasets for offline model training.
 - `strategy.py` — Backtrader strategies (moving average, mean reversion, multi-factor alpha, LightGBM alpha) and configuration helpers.
 - `backtest.py` — sets up Cerebro, runs backtests, and emits JSON reports.
 - `optimizer.py` — brute-force parameter search that reuses the backtest pipeline.

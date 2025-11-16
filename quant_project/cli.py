@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from typing import Sequence
+from typing import Any, Dict, Sequence
 
 from .backtest import run_backtest
 from .config import BacktestConfig, DataConfig, OptimizationConfig, StrategyConfig, TradeConfig
 from .data import fetch_data
+from .factor_pipeline import build_factor_dataset
+from .factors import DEFAULT_FACTOR_SET, FactorSpec, GLOBAL_FACTOR_REGISTRY
 from .optimizer import run_optimization
 from .trading import run_trade_session
 
@@ -57,6 +59,56 @@ def _build_strategy_config(args: argparse.Namespace) -> StrategyConfig:
         ml_positive_threshold=getattr(args, "ml_positive_threshold", defaults.ml_positive_threshold),
         ml_negative_threshold=getattr(args, "ml_negative_threshold", defaults.ml_negative_threshold),
     )
+
+
+def _normalize_factor_key(name: str) -> str:
+    return name.replace("-", "").replace("_", "").replace(" ", "").lower()
+
+
+def _coerce_cli_value(raw: str) -> Any:
+    lowered = raw.strip().lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        try:
+            return float(raw)
+        except ValueError:
+            return raw
+
+
+def _parse_factor_param_overrides(values: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    overrides: Dict[str, Dict[str, Any]] = {}
+    for raw in values:
+        if "=" not in raw or "." not in raw:
+            raise ValueError(f"Invalid --factor-param format '{raw}'. Expected 'factor.param=value'.")
+        target, raw_value = raw.split("=", 1)
+        identifier, param_name = target.split(".", 1)
+        key = _normalize_factor_key(identifier.strip())
+        overrides.setdefault(key, {})[param_name.strip()] = _coerce_cli_value(raw_value.strip())
+    return overrides
+
+
+def _build_factor_specs_from_args(factors: Sequence[str], param_args: Sequence[str]) -> Sequence[FactorSpec]:
+    overrides = _parse_factor_param_overrides(param_args)
+    requested = factors or DEFAULT_FACTOR_SET
+
+    specs: list[FactorSpec] = []
+    for raw in requested:
+        if ":" in raw:
+            name, alias = raw.split(":", 1)
+        else:
+            name, alias = raw, None
+        clean_name = name.strip()
+        alias_name = alias.strip() if alias else None
+
+        params = dict(overrides.get(_normalize_factor_key(clean_name), {}))
+        if alias_name:
+            params.update(overrides.get(_normalize_factor_key(alias_name), {}))
+
+        specs.append(FactorSpec(name=clean_name, alias=alias_name, params=params))
+    return specs
 
 
 def fetch_command(args: argparse.Namespace) -> None:
@@ -118,6 +170,30 @@ def trade_command(args: argparse.Namespace) -> None:
     report = run_trade_session(trade_cfg, loop=args.loop)
     if report:
         print(report)
+
+
+def factors_list_command(_: argparse.Namespace) -> None:
+    registry = GLOBAL_FACTOR_REGISTRY.available()
+    print("Available factors:")
+    for name in sorted(registry):
+        desc = registry[name].description or ""
+        print(f"- {name}: {desc}")
+
+
+def factors_build_command(args: argparse.Namespace) -> None:
+    data_cfg = _build_data_config(args)
+    specs = _build_factor_specs_from_args(args.factor or [], args.factor_param or [])
+    horizons = args.forward or []
+    dataset, output_path = build_factor_dataset(
+        data_cfg,
+        specs,
+        dropna=not args.keep_na,
+        forward_horizons=horizons,
+        output_path=args.output,
+    )
+    print(f"Generated factor dataset with shape {dataset.shape}.")
+    if output_path:
+        print(f"Saved dataset to {output_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -270,6 +346,45 @@ def build_parser() -> argparse.ArgumentParser:
     trade_parser.add_argument("--poll-interval", type=int, default=60, help="Refresh interval in seconds when looping.")
     trade_parser.add_argument("--loop", action="store_true", help="Loop indefinitely for paper trading.")
     trade_parser.set_defaults(func=trade_command)
+
+    factors_parser = subparsers.add_parser("factors", help="Factor pool utilities.")
+    factor_subparsers = factors_parser.add_subparsers(dest="factor_command", required=True)
+
+    factors_list_parser = factor_subparsers.add_parser("list", help="List the registered factors.")
+    factors_list_parser.set_defaults(func=factors_list_command)
+
+    factors_build_parser = factor_subparsers.add_parser("build", help="Generate factor values for training.")
+    _add_data_arguments(factors_build_parser)
+    factors_build_parser.add_argument(
+        "--factor",
+        action="append",
+        default=[],
+        help="Factor to include (optionally 'name:alias' for duplicates). Defaults to built-in set.",
+    )
+    factors_build_parser.add_argument(
+        "--factor-param",
+        action="append",
+        default=[],
+        help="Override factor parameters via 'identifier.param=value'. Identifiers can be names or aliases.",
+    )
+    factors_build_parser.add_argument(
+        "--forward",
+        nargs="*",
+        type=int,
+        default=[1, 5, 20],
+        help="Forward return horizons to append as targets.",
+    )
+    factors_build_parser.add_argument(
+        "--keep-na",
+        action="store_true",
+        help="Keep rows with NaNs (otherwise rows with missing factors are dropped).",
+    )
+    factors_build_parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional CSV path to persist the factor dataset.",
+    )
+    factors_build_parser.set_defaults(func=factors_build_command)
 
     return parser
 
