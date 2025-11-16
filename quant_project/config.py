@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PACKAGE_ROOT / "data"
@@ -72,6 +72,8 @@ class StrategyConfig:
     ml_model_path: Optional[str] = None
     ml_positive_threshold: float = 0.55
     ml_negative_threshold: float = 0.45
+    factor_names: Sequence[str] = ("momentum", "mean_reversion_z", "volatility", "daily_return", "volume_z_score")
+    factor_params: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

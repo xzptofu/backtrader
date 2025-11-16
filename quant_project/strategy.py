@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover - optional dependency
     lgb = None  # type: ignore[assignment]
 
 from .config import StrategyConfig
+from .factors import FactorRuntimeBuffer, build_factor_pool, specs_from_names
 
 logger = logging.getLogger(__name__)
 DEFAULT_CFG = StrategyConfig()
@@ -340,6 +341,8 @@ class MachineLearningAlphaStrategy(BaseStrategy):
         ("position_size", DEFAULT_CFG.position_size),
         ("volatility_target", DEFAULT_CFG.volatility_target),
         ("allow_short", DEFAULT_CFG.allow_short),
+        ("factor_names", DEFAULT_CFG.factor_names),
+        ("factor_params", DEFAULT_CFG.factor_params),
     )
 
     def __init__(self):
@@ -354,62 +357,45 @@ class MachineLearningAlphaStrategy(BaseStrategy):
             raise ValueError("positive_threshold must be greater than negative_threshold for MachineLearningAlphaStrategy.")
 
         self.model = lgb.Booster(model_file=self.p.model_path)
-        self.mean_sma = bt.indicators.SMA(self.datas[0], period=self.p.mean_reversion_window)
-        self.mean_std = bt.indicators.StdDev(self.datas[0], period=self.p.mean_reversion_window)
+        factor_specs = specs_from_names(self.p.factor_names, self.p.factor_params)
+        self.factor_pool = build_factor_pool(factor_specs)
+        self.factor_buffer = FactorRuntimeBuffer(self.factor_pool.required_columns, self.factor_pool.max_history)
+        self.feature_names = [factor.output_name for factor in self.factor_pool.factors]
         self.last_rebalance_bar = -self.p.rebalance_interval
 
-    def _volatility(self) -> float:
-        returns = []
-        for i in range(1, self.p.volatility_window + 1):
-            try:
-                prev_price = _safe_numeric(self.data.close[-i - 1])
-                curr_price = _safe_numeric(self.data.close[-i])
-            except IndexError:
-                break
-            if prev_price:
-                returns.append((curr_price / prev_price) - 1)
-        if not returns:
-            return 0.0
-        if len(returns) == 1:
-            return abs(returns[0])
-        return statistics.pstdev(returns)
-
-    def _build_features(self) -> Dict[str, float]:
-        price = _safe_numeric(self.data.close[0])
+    def _line_value(self, column: str) -> float:
+        attr = column.replace(" ", "_").lower()
+        line = getattr(self.data, attr, None)
+        if line is None and hasattr(self.data, column):
+            line = getattr(self.data, column)
+        if line is None:
+            return math.nan
         try:
-            past_price = _safe_numeric(self.data.close[-self.p.momentum_window])
-        except IndexError:
-            past_price = 0.0
+            return _safe_numeric(line[0])
+        except (IndexError, TypeError):
+            return math.nan
 
-        momentum = 0.0
-        if past_price:
-            momentum = (price / past_price) - 1
+    def _collect_features(self) -> Dict[str, float] | None:
+        if not self.factor_pool.required_columns:
+            return None
+        row = {column: self._line_value(column) for column in self.factor_pool.required_columns}
+        self.factor_buffer.push(row)
+        if not self.factor_buffer.ready(self.factor_pool.max_history):
+            return None
+        history = self.factor_buffer.to_dataframe()
+        features = self.factor_pool.compute_latest(history)
+        if not features:
+            return None
+        return features
 
-        std = _safe_numeric(self.mean_std[0])
-        mean = _safe_numeric(self.mean_sma[0])
-        mean_reversion = 0.0 if std == 0 else (price - mean) / std
-
-        volatility = self._volatility()
-
-        try:
-            prev_close = _safe_numeric(self.data.close[-1])
-        except IndexError:
-            prev_close = 0.0
-        daily_return = 0.0
-        if prev_close:
-            daily_return = (price / prev_close) - 1
-
-        volume = 0.0
-        if hasattr(self.data, "volume"):
-            volume = _safe_numeric(self.data.volume[0])
-
-        return {
-            "momentum": momentum,
-            "mean_reversion_z": mean_reversion,
-            "volatility": volatility,
-            "daily_return": daily_return,
-            "volume": volume,
-        }
+    def _volatility_from_features(self, features: Dict[str, float]) -> float:
+        for name in self.feature_names:
+            if "volatility" in name:
+                value = features.get(name)
+                if value is None or math.isnan(value):
+                    continue
+                return abs(value)
+        return 0.0
 
     def _target_from_prediction(self, prediction: float, volatility: float) -> float:
         target = 0.0
@@ -429,17 +415,17 @@ class MachineLearningAlphaStrategy(BaseStrategy):
         if self.order:
             return
 
-        features = self._build_features()
-        feature_vector = [
-            features["momentum"],
-            features["mean_reversion_z"],
-            features["volatility"],
-            features["daily_return"],
-            features["volume"],
-        ]
+        features = self._collect_features()
+        if not features:
+            return
+
+        feature_vector = [features.get(name, math.nan) for name in self.feature_names]
+        if not feature_vector or any(math.isnan(value) for value in feature_vector):
+            return
 
         prediction = float(self.model.predict([feature_vector])[0])
-        target_percent = self._target_from_prediction(prediction, features["volatility"])
+        volatility = self._volatility_from_features(features)
+        target_percent = self._target_from_prediction(prediction, volatility)
 
         price = _safe_numeric(self.data.close[0])
         current_exposure = self._current_exposure(price)
@@ -457,15 +443,18 @@ class MachineLearningAlphaStrategy(BaseStrategy):
         if self.order:
             self.cancel(self.order)
 
+        preview_pairs = []
+        for name in self.feature_names[:5]:
+            value = features.get(name)
+            if value is None or math.isnan(value):
+                continue
+            preview_pairs.append(f"{name}={value:.4f}")
+        preview = ", ".join(preview_pairs)
         self._log(
-            "ML SIGNAL -> pred=%.4f target=%.2f%% (mom=%.4f, mean=%.4f, vol=%.4f, ret=%.4f, volu=%.0f)",
+            "ML SIGNAL -> pred=%.4f target=%.2f%% [%s]",
             prediction,
             target_percent * 100,
-            features["momentum"],
-            features["mean_reversion_z"],
-            features["volatility"],
-            features["daily_return"],
-            features["volume"],
+            preview,
         )
         self.order = self.order_target_percent(target=target_percent)
         self.last_rebalance_bar = len(self)
@@ -531,6 +520,8 @@ def strategy_from_config(cfg: StrategyConfig) -> Tuple[type[bt.Strategy], dict]:
             position_size=cfg.position_size,
             volatility_target=cfg.volatility_target,
             allow_short=cfg.allow_short,
+            factor_names=tuple(cfg.factor_names),
+            factor_params=cfg.factor_params,
         )
         return MachineLearningAlphaStrategy, params
 
